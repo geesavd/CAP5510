@@ -1,0 +1,317 @@
+---
+title: "Bioinformatics_Project"
+output: html_document
+date: "2024-11-18"
+---
+```{r}
+require(tibble) # dataframe manipulation
+require(readr)  # for read_csv()
+require(dplyr)  # for mutate()
+require(tidyr)  # for unnest()
+require(purrr)  # for map(), reduce()
+library(here)
+```
+```{r}
+exp_path <- "/blue/kgraim/geesa.daluwatumu/CAP5510/human_canine_horse_cat_new.tsv"
+metadata_path <- "canine_horse_cat_human_metadata.tsv"
+```
+
+
+```{r}
+all_exp <- readr::read_tsv(here(exp_path))
+all_metadata <- readr::read_tsv(here(metadata_path))
+```
+
+```{r}
+all_exp_filtered <- all_exp 
+
+# Some run ids were not included. So had to remove these.
+all_metadata_filtered <- all_metadata[all_metadata$Sample %in% colnames(all_exp_filtered),]
+```
+
+
+```{r}
+unique(all_metadata$CancerType)
+```
+```{r}
+# Filter out Pheochromocytoma, NA
+all_metadata_filtered <- all_metadata_filtered %>% filter(CancerType != "Pheochromocytoma" | CancerType !="NA")
+all_exp_filtered<- all_exp_filtered %>% dplyr::select("Genes", all_metadata_filtered$Sample)
+
+# Harmonize species cancer types
+all_metadata_filtered$CT <- all_metadata_filtered$CancerType
+all_metadata_filtered$CT[grep("meningioma", all_metadata_filtered$CT, ignore.case = TRUE)] <- "Meningioma"
+all_metadata_filtered$CT[grep("Adrenocortical Carcinoma", all_metadata_filtered$CT, ignore.case = TRUE)] <- "Adrenal Tumor"
+all_metadata_filtered$CT[grep("Cholangiocarcinoma", all_metadata_filtered$CT, ignore.case = TRUE)] <- "Hepatobiliary Cancer"
+all_metadata_filtered$CT[grep("Seminoma|Non-Seminomatous Germ Cell Tumor", all_metadata_filtered$CT, ignore.case = TRUE)] <- "Germ Cell Tumor"
+all_metadata_filtered$CT[grep("Mast Cell Tumor", all_metadata_filtered$CT, ignore.case = TRUE)] <- "Leukemia"
+all_metadata_filtered$CT[grep("Mature B-Cell Neoplasms", all_metadata_filtered$CT, ignore.case = TRUE)] <- "Lymphoma"
+```
+
+```{r}
+# Check if this is in the same order
+all.equal(colnames(all_exp_filtered[-1]), all_metadata_filtered$Sample)
+```
+
+```{r}
+# Check for NA 
+sum(is.na(all_exp_filtered))
+```
+
+```{r}
+# Get NA values as a percentage per row
+missing_values <- all_exp_filtered
+missing_values$missing_values_perc <- rowSums(is.na(all_exp_filtered[-1])) / ncol(all_exp_filtered[-1]) * 100
+missing_values <- missing_values[order(missing_values$missing_values_perc, decreasing = TRUE),]
+print(length(missing_values$Genes))
+print(length(missing_values[missing_values$missing_values_perc == 0,]))
+```
+
+```{r}
+library(ggplot2)
+
+# Visualize the NA as a density plot
+NA_df <- missing_values[missing_values$missing_values_perc > 0 ,]
+cutoff <- round(quantile(NA_df$missing_values_perc , probs = 0.5))
+density_plot <-  ggplot()+ geom_density(data = NA_df, aes(missing_values_perc), colour=c("blue")) + ggtitle("Missing Value Percentage Distribution") + labs(y = "Density", x = "Percentage (%)") + geom_vline(xintercept = cutoff, color = 'red') +  annotate(geom = 'text', x = cutoff, y = 0.025, color = 'red', label = paste0(cutoff, '%'), hjust = -0.1)
+ggsave('missing percentage density plot.png', density_plot, path = here(plot_folder))
+density_plot
+```
+
+```{r}
+# Get expression data having rows with less than the cutoff percentage for missing data
+all_exp_filtered <- all_exp_filtered %>% filter(Genes %in% missing_values[missing_values$missing_values_perc <= cutoff ,]$Genes)
+# Impute 0 for NA values in the TCGA data
+all_exp_filtered[is.na(all_exp_filtered)] <- 0
+```
+
+```{r}
+# Check if there are NAs in the Genes (gene names)
+sum(is.na(all_exp_filtered$Genes))
+
+# Check if there are duplicated Genes
+sum(duplicated(all_exp_filtered$Genes))
+```
+
+```{r}
+write.table(all_exp_filtered, here("human_canine_horse_cat_no_dup_new.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE)
+```
+
+```{r}
+# Check if there are duplicated Genes
+sum(duplicated(all_exp_filtered$Genes))
+
+# Check if this is in the same order
+all.equal(colnames(all_exp_filtered[-1]), all_metadata_filtered$Sample)
+```
+
+```{r}
+all_exp_filtered_rem <- all_exp_filtered %>% column_to_rownames("Genes")
+all_exp_filtered_rem
+```
+
+```{r}
+# Transpose the data to make the observations in columns and variables in rows
+exp_transposed <- t(all_exp_filtered_rem)
+exp_transposed[1:5,1:5]
+```
+
+```{r}
+# Remove 0 values to plot PCA
+exp_subset <- exp_transposed[ , which(apply(exp_transposed, 2, var) != 0)]
+exp_subset[1:5,1:5]
+```
+```{r}
+# Performs a principal components analysis
+df_pca <- prcomp(exp_subset, scale=TRUE, center = TRUE)
+```
+
+```{r}
+# Plot the PCA using `ggplot()` function
+df <- data.frame('data' = df_pca$x[,1:2], 'BioProject' = all_metadata_filtered$Sample, 'Species' = all_metadata_filtered$Species, 'CancerType' = all_metadata_filtered$CT)
+pca_plot <- ggplot(
+  df,
+  aes(
+    x = df_pca$x[,1],
+    y = df_pca$x[,2],
+    shape = Species,
+    color = CancerType
+  )
+) + geom_point() + ggtitle("Dog, Human, Horse and Cat Cancer Samples Before Batch Correction")  + labs(y= "PC2", x = "PC1")
+ggsave('Pc1_pc2.png', pca_plot, width=20, height=20, limitsize = FALSE)
+pca_plot
+```
+
+```{r}
+#Need to perform batch correction for bioprojects within species
+#Filter for dog and cat separately then do batch correction for each species bioprojects
+#Then combine human and horse with the new dog and new cat batch corrections
+#Then batch correct for the 4 bioprojects 
+library(sva) # for combat 
+
+# Filter expression and metadata for all species
+dog_metadata <- all_metadata_filtered %>% filter(Species == "Canis lupus familiaris")
+cat_metadata <- all_metadata_filtered %>% filter(Species == "Felis catus")
+horse_metadata <- all_metadata_filtered %>% filter(Species == "Equus caballus")
+human_metadata <- all_metadata_filtered %>% filter(Species == "Homo sapiens")
+
+dog_expression <- all_exp_filtered[, colnames(all_exp_filtered) %in% c("Genes", dog_metadata$Sample)]
+cat_expression <- all_exp_filtered[, colnames(all_exp_filtered) %in% c("Genes", cat_metadata$Sample)]
+horse_expression <- all_exp_filtered[, colnames(all_exp_filtered) %in% c("Genes", horse_metadata$Sample)]
+human_expression <- all_exp_filtered[, colnames(all_exp_filtered) %in% c("Genes", human_metadata$Sample)]
+```
+
+```{r}
+library(edgeR)
+
+# Function to normalize expression data
+normalize_rnaseq <- function(counts_df) {
+  # Create a DGEList from the counts dataframe
+  counts_df_rem <- counts_df %>% column_to_rownames("Genes")
+  expr <- DGEList(counts = counts_df_rem)
+  # Calculate TMM normalization factors
+  expr <- calcNormFactors(expr)
+  # Get the normalized counts in log scale and adds 1
+  exp_norm <- as.data.frame(cpm(expr, log = TRUE, prior.count=1))
+  # Return the normalized data frame
+  return(exp_norm)
+}
+
+# Human data is already normalized, just log the values
+human_expression_rem <- human_expression %>% column_to_rownames("Genes")
+human_exp_norm <- mutate_if(human_expression_rem, is.numeric, ~log2(.+1))
+
+# Normalize other species expression values
+dog_exp_norm <- normalize_rnaseq(dog_expression)
+cat_exp_norm <- normalize_rnaseq(cat_expression)
+horse_exp_norm <- normalize_rnaseq(horse_expression)
+```
+
+```{r}
+# Batch correction for dog
+dog_batch <- dog_metadata$ProjCode ####CHECK IF THIS COL NAME IS RIGHT
+dog_corrected <- ComBat(dat = as.matrix(dog_exp_norm), batch = dog_batch, mod = model.matrix(~1, data = dog_metadata))
+
+# Batch correction for cat
+cat_batch <- cat_metadata$bioproject
+cat_corrected <- ComBat(dat = as.matrix(cat_exp_norm), batch = cat_batch, mod = model.matrix(~1, data = cat_metadata))
+```
+
+```{r}
+# Assuming human and horse are already batch-corrected
+# Combine data
+combined_expression <- cbind(dog_corrected, cat_corrected, human_exp_norm, horse_exp_norm)
+
+# Update metadata accordingly
+combined_metadata <- all_metadata_filtered %>%
+mutate(Species = factor(Species, levels = c("Canis lupus familiaris", "Felis catus", "Homo sapiens", "Equus caballus"))) %>%
+  arrange(Species)
+```
+
+```{r}
+# Check if this is in the same order
+all.equal(colnames(combined_expression), combined_metadata$Sample)
+```
+
+```{r}
+# Transpose the data to make the observations in columns and variables in rows
+exp_transposed_corrected <- t(combined_expression)
+exp_transposed_corrected[1:5,1:5]
+```
+
+```{r}
+# Remove 0 values to plot PCA
+exp_subset_corrected <- exp_transposed_corrected[ , which(apply(exp_transposed_corrected, 2, var) != 0)]
+exp_subset_corrected[1:5,1:5]
+```
+
+```{r}
+# perform PCA
+df_pca_corrected <- prcomp(exp_subset_corrected, scale=TRUE, center = TRUE)
+```
+
+```{r}
+df_corrected <- data.frame('data' = df_pca_corrected$x[,1:2], 'Species' = combined_metadata$Species, 'CancerType' = combined_metadata$CT)
+# Reorder Species so that "human" comes before "canine"
+#df_corrected$Species <- factor(df_corrected$Species, levels = c("Human", "Canine"))
+# Reorder the dataframe by Species
+df_corrected <- df_corrected %>%
+  arrange(Species)
+pca_plot_corrected <- ggplot(
+  df_corrected,
+  aes(
+    x = df_pca_corrected$x[,1],
+    y = df_pca_corrected$x[,2],
+    color = CancerType
+    )
+) +
+  # Make a scatter plot
+  geom_point(size=3) + ggtitle("Individual species bioproject correction") + labs(y= "PC2", x = "PC1") +
+  theme_minimal()+
+  labs(color = "Cancer type")
+ggsave('Pc1_pc2_corrected_individual_species_bioproj.png', pca_plot_corrected, width=20, height=20, limitsize = FALSE)
+# display annotated plot
+pca_plot_corrected
+```
+
+```{r}
+# Batch correction for species
+species_batch <- combined_metadata$Species 
+combined_exp_corrected <- ComBat(dat = as.matrix(combined_expression), batch = species_batch, mod = model.matrix(~1, data = combined_metadata))
+```
+
+```{r}
+# Transpose the data to make the observations in columns and variables in rows
+exp_transposed_corrected_all <- t(combined_exp_corrected)
+exp_transposed_corrected_all[1:5,1:5]
+```
+
+```{r}
+# Remove 0 values to plot PCA
+exp_subset_corrected_all <- exp_transposed_corrected_all[ , which(apply(exp_transposed_corrected_all, 2, var) != 0)]
+exp_subset_corrected_all[1:5,1:5]
+```
+
+```{r}
+# perform PCA
+df_pca_corrected_all <- prcomp(exp_subset_corrected_all, scale=TRUE, center = TRUE)
+```
+
+```{r}
+df_corrected_all <- data.frame('data' = df_pca_corrected_all$x[,1:2], 'Species' = combined_metadata$Species, 'CancerType' = combined_metadata$CT)
+# Reorder Species so that "human" comes before "canine"
+#df_corrected$Species <- factor(df_corrected$Species, levels = c("Human", "Canine"))
+# Reorder the dataframe by Species
+#df_corrected <- df_corrected %>%arrange(Species)
+pca_plot_corrected_all <- ggplot(
+  df_corrected_all,
+  aes(
+    x = df_pca_corrected_all$x[,1],
+    y = df_pca_corrected_all$x[,2],
+    color = CancerType,
+    shape = Species
+    )
+) +
+  # Make a scatter plot
+  geom_point(size=3) + ggtitle("All species correction together") + labs(y= "PC2", x = "PC1") +
+  theme_minimal()+
+  labs(color = "Cancer type")
+
+ggsave('Pc1_pc2_corrected_all_cancertype.png', pca_plot_corrected_all, width=20, height=20, limitsize = FALSE)
+# display annotated plot
+pca_plot_corrected_all
+```
+
+```{r}
+cancer_batch_corrected <- as.data.frame(combined_exp_corrected)
+metadata_batch <- as.data.frame(combined_metadata)
+
+# Write output
+output_batch <- rownames_to_column(cancer_batch_corrected, "Genes")
+```
+
+```{r}
+write.table(output_batch, here("Final_exp_batch_corrected.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE)
+write.table(metadata_batch, here("Final_metadata.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE)
+```
+
