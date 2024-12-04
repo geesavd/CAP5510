@@ -1,0 +1,1037 @@
+---
+title: "Bioinformatics Project ML"
+output: html_document
+date: "2024-11-22"
+---
+
+```{r}
+require(tibble) # dataframe manipulation
+require(readr)  # for read_csv()
+require(dplyr)  # for mutate()
+require(tidyr)  # for unnest()
+require(purrr)  # for map(), reduce()
+library(tidymodels)
+library(here)
+```
+
+
+```{r}
+exp_path <- "Final_exp_batch_corrected.tsv"
+metadata_path <- "Final_metadata.tsv"
+
+# change species_1 to run species wise prediction
+#species_1 <- 'Canis lupus familiaris'
+species_1 <- 'Equus caballus'
+#species_1 <- 'Felis catus'
+
+species_2 <- 'Homo sapiens'
+seed <- 123456789
+```
+
+
+```{r}
+all_exp <- readr::read_tsv(here('..', '..','briasmith','r_projects', exp_path))
+all_metadata <- readr::read_tsv(here('..', '..', 'briasmith','r_projects', metadata_path))
+
+# read individual species expression to get common genes
+human_exp <- readr::read_tsv(here('human_expr.tsv'))
+
+dog_exp <- readr::read_tsv(here('canine_expr_ortho.tsv'))
+
+horse_exp <- readr::read_tsv(here('..', '..', 'briasmith','r_projects', 'Equus_caballus','PRJNA606607.count'))
+
+# Keep everything after the 2nd underscore
+horse_exp$Genes <- sub("^[^_]*_[^_]*_(.*)", "\\1", horse_exp$Genes)
+# Remove the '+' and '-' signs from the Genes column
+horse_exp$Genes <- gsub("[+-]", "", horse_exp$Genes)
+
+cat_exp <- readr::read_tsv(here('..', '..', 'briasmith','r_projects', 'Felis_catus','PRJNA640049.count'))
+
+# Keep everything after the 2nd underscore
+cat_exp$Genes <- sub("^[^_]*_[^_]*_(.*)", "\\1", cat_exp$Genes)
+# Remove the '+' and '-' signs from the Genes column
+cat_exp$Genes <- gsub("[+-]", "", cat_exp$Genes)
+```
+
+```{r}
+# get common genes in all species
+common_genes_in_all <- intersect(
+  unique(dog_exp$Gene),
+  intersect(
+    unique(cat_exp$Genes), 
+    intersect(unique(human_exp$Hugo_Symbol), unique(horse_exp$Genes))
+    ))
+length(common_genes_in_all)
+```
+
+```{r}
+# Get cancers having both species data
+all_species_cancers <- as.data.frame(table(all_metadata[,c("Species","CT")])) %>%
+  group_by(CT,Species) %>%
+  summarize(counts = sum(Freq>0)) %>%
+  group_by(CT) %>%
+  # if 2 then at least 2 species have data
+  filter(sum(counts) > 1) %>%
+  select(CT) %>%
+  unique()
+
+# filter metadata
+all_species_metadata <- all_metadata %>% filter(CT %in% (all_species_cancers$CT))
+
+# adjust exp based on metadata
+all_species_exp <- all_exp[,c("Genes", all_species_metadata$Sample)]
+
+# filter for the common genes
+all_species_exp <- all_species_exp %>% filter(Genes %in% common_genes_in_all)
+```
+```{r}
+# Without gene column
+all_exp_w_genes <- all_species_exp[-1]
+```
+
+```{r}
+# Calculates the pearson correlation between samples
+sample_cor <- all_exp_w_genes %>%
+  cor() %>%
+  as.matrix()
+```
+
+```{r}
+unique(all_species_metadata$Species)
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)  # For colorRamp2
+#
+# custom color pallette
+cancer_type_colors <- c(
+  'Brain Cancer' = '#7d4600',
+  'Bladder Cancer' = '#f9e900',
+  'Melanoma' = '#c62e65',
+  'Lymphoma' = '#8a3033',
+  'Leukemia' = "#eb4511",
+  'Head and Neck Cancer' = "#2f4b26",
+  'Sarcoma' = "#3d3522",
+  'Breast Cancer' = "#f02d3a",
+  'Prostate Cancer' = "#d63af9",
+  'Adrenal Tumor' = "#231c07"
+)
+
+# Define custom color mapping
+col_fun <- colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+
+# Create the heatmap with proper annotation settings
+ss_hm <- Heatmap(
+  sample_cor,
+  col = col_fun,  # Custom color mapping for correlation values
+  cluster_columns = FALSE,
+  cluster_rows = FALSE,
+  top_annotation = HeatmapAnnotation(
+    df = data.frame(CancerType = all_species_metadata$CT, Species = all_species_metadata$Species),
+    show_annotation_name = FALSE,
+    col = list(Species = c("Canis lupus familiaris"="#4f0782", "Felis catus"="lightblue", "Equus caballus" = "brown", "Homo sapiens" = "darkgray"), CancerType = cancer_type_colors),
+    annotation_legend_param = list(
+      title = "Cancer type"
+    )
+  ),
+  left_annotation = rowAnnotation(
+    df = data.frame(CancerType = all_species_metadata$CT, Species = all_species_metadata$Species),
+    col = list(Species = c("Canis lupus familiaris"="#4f0782", "Felis catus"="lightblue", "Equus caballus" = "brown", "Homo sapiens" = "darkgray"), CancerType = cancer_type_colors),
+    show_annotation_name = FALSE
+  ),
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  show_row_dend = FALSE,
+  heatmap_legend_param = list(
+    title = 'Pearson correlation',
+    title_gp = gpar(fontsize = 20),   # Font size for the title
+    labels_gp = gpar(fontsize = 20),  # Font size for the labels
+    legend_height = unit(5, "cm")     # Height of the legend bar
+  )
+)
+
+# Plot and save the heatmap
+png("Sample-Sample_Correlation.png", width = 20, height = 20, units = 'in', res = 1200)
+draw(ss_hm, padding = unit(c(0.2, 0.2, 0.2, 0.2), "in"))
+dev.off()
+
+# Display the heatmap object
+ss_hm
+
+```
+```{r}
+# Transpose the data to make the observations in columns and variables in rows
+exp_transposed_corrected <- t(all_exp_w_genes)
+exp_transposed_corrected[1:5,1:5]
+```
+
+```{r}
+# Remove 0 values to plot PCA
+exp_subset_corrected <- exp_transposed_corrected[ , which(apply(exp_transposed_corrected, 2, var) != 0)]
+exp_subset_corrected[1:5,1:5]
+```
+
+```{r}
+# perform PCA
+df_pca_corrected <- prcomp(exp_subset_corrected, scale=TRUE, center = TRUE)
+```
+
+```{r}
+df_corrected <- data.frame('data' = df_pca_corrected$x[,1:2], 'Species' = all_species_metadata$Species, 'CancerType' = all_species_metadata$CT)
+
+# Reorder Species so that "human" comes before "canine"
+df_corrected$Species <- factor(df_corrected$Species, levels = c("Homo sapiens", "Canis lupus familiaris", "Equus caballus", "Felis catus" ))
+
+# Reorder the dataframe by Species
+df_corrected <- df_corrected %>%
+  arrange(Species)
+
+
+pca_plot_corrected <- ggplot(
+  df_corrected,
+  aes(
+    x = df_pca_corrected$x[,1],
+    y = df_pca_corrected$x[,2],
+    color = CancerType,
+    shape = Species
+  )
+) +
+  # Make a scatter plot
+  geom_point(size=3) +
+  labs(y= "PC2", x = "PC1") +
+
+ theme_minimal()+
+  #change font size of all text
+  theme(text=element_text(size=20),
+        #change font size of axis text
+        axis.text=element_text(size=20),
+        #change font size of axis titles
+        axis.title=element_text(size=20),
+        #change font size of plot title
+        plot.title=element_text(size=20),
+        #change font size of legend text
+        legend.text=element_text(size=20),
+        #change font size of legend title
+        legend.title=element_text(size=20),
+        legend.key.size = unit(1,"line"),
+        panel.grid.major.x = element_line(size = 3), panel.grid.major.y = element_line(size = 3))+
+  guides(color = guide_legend(override.aes = list(size = 10))) +
+  #guides(color="none")+
+  labs(color = "Cancer type")+
+  # Use the custom color palette
+  scale_color_manual(values = cancer_type_colors)
+
+ggsave('Pc1_pc2_corrected_cancertype.png', pca_plot_corrected, width=20, height=20, limitsize = FALSE)
+
+# display annotated plot
+pca_plot_corrected
+```
+
+```{r}
+# get common genes in the two species
+#for dog
+if (species_1=="Canis lupus familiaris"){
+  common_genes <-  intersect(human_exp$Hugo_Symbol, dog_exp$Gene)
+}else if(species_1=="Equus caballus") {
+  # for horse
+  common_genes <-  intersect(human_exp$Hugo_Symbol, horse_exp$Genes)
+}else if(species_1=="Felis catus"){
+  # for cat
+  common_genes <-  intersect(human_exp$Hugo_Symbol, cat_exp$Genes)
+}
+length(common_genes)
+# horse 14604
+# cat 3 files 14358, 14358, 14358
+```
+
+```{r}
+# Get the metadata and expression data for the 2 species
+species_metadata <- all_metadata %>% filter(Species == species_1 | Species == species_2)
+
+# count species, cancer type distribution
+species_cancertype <- as.data.frame(table(species_metadata[,c("Species","CT")]))
+
+# Get cancers having both species data
+both_species_cancers <- species_cancertype %>%
+  group_by(CT,Species) %>%
+  summarize(counts = sum(Freq>0)) %>%
+  group_by(CT) %>%
+  # if 2 then both species have data
+  filter(sum(counts) > 1) %>%
+  select(CT) %>%
+  unique()
+
+# filter metadata
+species_metadata <- species_metadata %>% filter(CT %in% (both_species_cancers$CT))
+
+# adjust exp based on metadata
+species_exp <- all_exp[,c("Genes", species_metadata$Sample)]
+
+# filter for the common genes
+species_exp <- species_exp %>% filter(Genes %in% common_genes)
+
+# Check if this is in the same order
+all.equal(colnames(species_exp[-1]), species_metadata$Sample)
+```
+
+```{r}
+table(species_metadata$Species, species_metadata$CT)
+```
+
+
+```{r}
+# Check if this is in the same order
+all.equal(colnames(species_exp[-1]), species_metadata$Sample)
+table( species_metadata$Species, species_metadata$CT)
+```
+
+
+```{r}
+# Transpose normalized_counts 
+species_exp_rem <- species_exp %>%
+  # Move Gene column to rownames
+  column_to_rownames("Genes")
+transposed_species_exp <- as.data.frame(t(species_exp_rem)) %>%
+  # Convert rownames to a Sample column
+  rownames_to_column("Sample") 
+# Merge transposed_counts with metadata
+combined_data <- transposed_species_exp %>%
+  inner_join(data.frame(Sample = species_metadata$Sample, Species=species_metadata$Species, CT=species_metadata$CT), by = "Sample")
+# make the target variable a factor
+combined_data <- combined_data %>%
+  mutate(Species = as.factor(Species))
+# Create a combined column for stratification
+combined_data <- combined_data %>%
+  mutate(strat_group = paste(Species, CT, sep = "_"))
+```
+
+
+Species Prediction
+
+```{r}
+# Split the data into training and testing based on the given strata
+set.seed(seed)
+species_split <- initial_split(combined_data, prop=0.6, strata=Species) 
+species_split
+```
+
+```{r}
+train_data <- training(species_split)
+test_data <- testing(species_split)
+```
+
+
+
+```{r}
+# cat rf was poor
+library(themis)
+
+set.seed(seed)
+# Create a recipe for preprocessing
+species_recipe <- recipe(Species ~., data = train_data) %>%
+  # downsampling to match samples across species cancers
+  step_downsample(strat_group, seed = seed) %>%
+  # set these to show these are not features
+  update_role(Sample, new_role = "ID") %>%
+  update_role(CT, new_role = "CT") %>%
+  update_role(strat_group, new_role = "strata") 
+
+if(species_1=="Felis catus"){
+  
+  # Define xgboost
+  model <-  parsnip::boost_tree(trees = 500) %>%
+  set_engine("xgboost")%>%
+  set_mode("classification")
+  model_name <- "XGB"
+  
+  # model <- rand_forest(mtry = 5, trees = 500, min_n = 10) %>%
+  # set_engine("ranger", importance = "impurity") %>%
+  # set_mode("classification")
+  # model_name <- "RF"
+
+}else{
+  # Define the Random Forest model
+  model <- rand_forest(mtry = 5, trees = 500, min_n = 10) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+  model_name <- "RF"
+}
+
+# Combine into a workflow
+species_workflow <- workflow() %>%
+  add_recipe(species_recipe) %>%
+  add_model(model)
+
+# Train the model on the training data
+set.seed(seed)
+final_fit <- fit(species_workflow, data = train_data)
+
+# Make predictions on the test set
+test_predictions <- predict(final_fit, new_data = test_data, type = "prob") %>%
+  bind_cols(predict(final_fit, new_data = test_data)) %>%
+  bind_cols(test_data)
+
+# Confusion matrix
+conf_matrix <- conf_mat(test_predictions, truth = Species, estimate = .pred_class)
+
+# Metrics 
+metrics_summary <- metrics(test_predictions, truth = Species, estimate = .pred_class)
+roc_auc_value <- roc_auc(test_predictions, truth = Species, paste0(".pred_",species_1)) 
+precision <- precision(test_predictions, truth = Species, estimate = .pred_class)
+recall <- recall(test_predictions, truth = Species, estimate = .pred_class)
+f1_score <- f_meas(test_predictions, truth = Species, estimate = .pred_class)
+
+# Display results
+print(conf_matrix)
+print(metrics_summary)
+print(roc_auc_value)
+print(precision)
+print(recall)
+print(f1_score)
+
+# Plot the ROC Curve
+roc_curve_data <- roc_curve(test_predictions, truth = Species, paste0(".pred_",species_1)) 
+roc_plot <- autoplot(roc_curve_data)
+ggsave(paste0("ROC_Curve_human_",species_1,"_",model_name,".jpg"), plot = roc_plot, width = 8, height = 8, dpi = 300)
+
+```
+
+
+```{r}
+library(vip)
+set.seed(seed)
+# Compute feature importance
+feat_imp <- species_workflow %>% 
+  fit(train_data) %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 15000)
+```
+
+```{r}
+# get important genes greater than 0
+feat_imp_genes <- feat_imp$data %>% filter(Importance>=quantile(feat_imp$data$Importance, 0.95))
+#feat_imp_genes <- feat_imp$data %>% filter(Importance> median(feat_imp_genes0$Importance))
+feat_imp_genes
+```
+
+
+```{r}
+# Read cosmic gene file
+cosmic_genes <- readr::read_tsv(here('cosmic','Cosmic_Genes_v98_GRCh37.tsv'))
+cosmic_genes_cancer <-readr::read_tsv(here('cosmic', 'Census_allTue Oct 31 19_40_11 2023.tsv'))
+all_cosmic <- inner_join(cosmic_genes, cosmic_genes_cancer, by=c('GENE_SYMBOL'='Gene Symbol'))
+all_cosmic
+```
+
+```{r}
+#Check is cosmic genes are in the feature importance results
+cosmic_res_feat <- all_cosmic %>%
+  filter(GENE_SYMBOL %in% feat_imp_genes$Variable) %>%
+  dplyr::select(c(GENE_SYMBOL, Name, `Tumour Types(Somatic)`, `Tumour Types(Germline)`, `Cancer Syndrome`))
+
+cosmic_res_feat
+```
+
+```{r}
+# Split `Tumour Types(Somatic)` column into multiple rows as it has many cancers 
+# for all cosmic genes
+all_cosmic_separated <- all_cosmic %>%
+  separate_rows(`Tumour Types(Somatic)`, sep = ",") %>%
+  # Remove any extra spaces around tumor types
+  mutate(`Tumour Types(Somatic)` = trimws(`Tumour Types(Somatic)`))
+
+all_cosmic_separated
+
+```
+
+
+```{r}
+# categorize tumor type somatic
+group_cancer_types <- function(df) {
+  df <- df %>% 
+    mutate(GroupedCategory = case_when(
+      `Tumour Types(Somatic)` %in% c(
+        "glioblastoma", "glioma", "medulloblastoma", "primary central nervous system lymphoma", 
+        "pilocytic astrocytoma", "oligodendroglioma", "hemangioblastoma", "ganglioglioma", 
+        "paediatric GBM", "central nervous system hemangioblastomas", "paediatric glioblastoma", 
+        "meningioma", "diffuse intrinsic pontine glioma (DIPG)", "angiocentric glioma", "sporadic medulloblastoma", "primary central nervous system melanocytic neoplasms","DIPG" , "GBM") ~ "Brain Cancer",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "HNSCC", "head and neck SCC", "adenoid cystic carcinoma", 
+        "polymorphous adenocarcinoma of the minor salivary glands", "head and neck cancer",
+        "cribriform adenocarcinoma of the minor salivary glands", "Spitzoid tumour", 
+        "oral squamous cell carcinoma", "nasopharyngeal carcinoma", "laryngeal SCC", "salivary gland mucoepidermoid", "oral squamous cell" , "head-neck squamous cell" , "oral SCC", "head and neck") ~ "Head and Neck Cancer",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "bladder carcinoma", "urothelial cell carcinoma", "urothelial cancer","bladder cancer", "bladder") ~ "Bladder Cancer",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "endometrial stromal sarcoma", 
+        "fibromyxoid sarcoma", "liposarcoma", "Ewing sarcoma", "extraskeletal myxoid chondrosarcoma", 
+        "synovial sarcoma", "soft tissue sarcoma", "alveolar soft part sarcoma", 
+        "angiosarcoma", "mesenchymal chondrosarcoma", "malignant peripheral nerve sheath tumours", 
+        "clear cell sarcoma", "desmoplastic small round cell tumour", "rhabdomyosarcoma", 
+        "embryonal rhabdomyosarcoma", "alveolar rhabdomyosarcoma", "myxoid chondrosarcoma", "myxofibrosarcoma", "chondrosarcoma", "epithelioid haemangioendothelioma", "clear cell sarcoma of soft parts", "sarcoma" , "meningeal haemangiopericytoma", "congenital fibrosarcoma","Ewing's sarcoma","infrequent sarcomas") ~ "Sarcoma",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "melanoma", "desmoplastic melanoma", "mucosal melanoma", "uveal melanoma", 
+        "cutaneous melanoma", "malignant melanoma of soft parts", "DFSP", "skin basal cell", "skin squamous cell" , "skin SCC" , "skin basal cell carcinoma", "skin cancer","skin squamous cell carcinoma-burn scar related", "skin") ~ "Melanoma and Skin Cancers",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "breast cancer", "secretory breast carcinoma",  "secretory breast","lobular breast", 
+        "lobular breast carcinoma", "luminal A breast carcinoma", "invasive ductal carcinoma", 
+        "breast carcinoma", "luminal A breast", "breast") ~ "Breast Cancer",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "splenic marginal zone lymphoma", "Hodgkin lymphoma", 
+        "nodular lymphocyte predominant Hodgkin lymphoma", "marginal zone lymphoma", 
+        "mantle cell lymphoma", "Burkitt lymphoma", "B-NHL", "T-cell lymphoma", 
+        "diffuse large B-cell lymphoma (DLBCL)", "ABC-DLBCL", "PMBL", "lymphoblastic lymphoma", 
+        "follicular lymphoma", "small lymphocytic lymphoma", "nasal NK/T lymphoma", "lymphoma", "Nodular lymphocyte predominant Hodgkin lymphoma", "DLBCL", "NHL" , "ALCL", "peripheral T-cell lymphoma", "SMZL", "intestinal T-cell lymphoma" , "MALT","lymphomas","MLCLS","BNHL" ,"T cell lymphomas" , "paediatric Burkitt lymphoma" , "MCL","marginal zone B-cell lymphomas") ~ "Lymphoma",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "prostate cancer", "prostate carcinoma", "prostate adenocarcinoma", "prostae adenocarcinoma", "prostate") ~ "Prostate Cancer",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "AML", "ALL", "pre-B ALL", "T-ALL", "B-ALL", "adult T-cell leukemia", "CML", "CLL", 
+        "T-PLL", "Down syndrome associated ALL", "megakaryoblastic leukemia", "myelodysplastic syndrome (MDS)", "juvenile myelomonocytic leukemia (JMML)", "large granular lymphocytic leukemia", 
+        "acute megakaryocytic leukemia", "MDS/MPN-U", "relapse ALL", "MDS", "ETP ALL", "APL", "AML*", "AL", "pre B-ALL", "lymphoblastic leukaemia/biphasic", "T-cell large granular lymphocytic leukaemia", "JMML", "AEL","CMML", "aCML", "CNL" ,"de novo AML", "T cell prolymphocytic leukaemia", "T-cell leukaemia", "sAML", "chemorefractory CLL", "megakaryoblastic leukaemia of Downs syndrome"   ,"MDS and related", "large granular lymphocytic leukaemia" ,"AML (CML blast transformation)","B-CLL" ,"acute megakaryocytic leukaemia" ,"Downs associated ALL" , "APL (translocation)" , "myelodysplastic syndrome","leukaemia","T-CLL") ~ "Leukemia",
+      
+      `Tumour Types(Somatic)` %in% c(
+        "adrenal adenoma", "adrenal aldosterone-producing adenoma", "adrenocortical carcinoma", 
+        "pheochromocytoma", "cortisol-secreting adrenal adenoma", "adrenal aldosterone producing adenoma", "cortisol secreting adrenal adenoma", "adrenocortical") ~ "Adrenal Tumor",
+      
+      TRUE ~ "Other"
+    ))
+}
+
+all_cosmic_terms_separated_groups <- group_cancer_types(all_cosmic_separated)
+all_cosmic_terms_separated_groups
+```
+
+
+```{r}
+inter_df <- all_cosmic_terms_separated_groups
+
+# how many cancer specific genes are in the total database
+frequency_table_all <- inter_df %>%
+  group_by(GroupedCategory) %>%
+  filter(GroupedCategory!="Other") %>%
+  summarise(GroupCategoryCount = n_distinct(GENE_SYMBOL)) %>%
+  mutate(GroupCategoryCountProp = GroupCategoryCount / sum(GroupCategoryCount)*100)
+
+# how many cancer specific in feature importance
+frequency_table <- inter_df %>%
+  group_by(GroupedCategory) %>%
+  filter(GroupedCategory!="Other") %>%
+  filter(GENE_SYMBOL %in% feat_imp_genes$Variable) %>%
+  # get the number of unique genes in each cancer group; the same gene can be in multiple cancer groups
+  summarise(GroupCategoryCount = n_distinct(GENE_SYMBOL)) %>%
+  mutate(GroupCategoryCountProp = GroupCategoryCount / sum(GroupCategoryCount)*100)
+
+# Join the tables to align the filtered counts with the total counts
+proportion_table <- frequency_table %>%
+  full_join(frequency_table_all, by = "GroupedCategory", suffix = c("_Filtered", "_Total")) %>%
+  replace(is.na(.), 0)
+
+proportion_table %>% arrange((GroupCategoryCount_Filtered))
+```
+
+
+```{r}
+# Fisher's exact test for each cancer type
+sum_GroupCategoryCount_Filtered <- sum(proportion_table$GroupCategoryCount_Filtered)
+sum_GroupCategoryCount_Total <- sum(proportion_table$GroupCategoryCount_Total)
+
+cancer_comparison <- proportion_table  %>%
+    rowwise() %>%
+    mutate(
+        # perform fisher test; greater to see if one category has a considerably higher probability of occurring compared to the other category,
+        P_Value = fisher.test(
+          # rows are important, not important and columns are the cancer considered and other cancers
+            matrix(c(
+                # important cancer considered
+                GroupCategoryCount_Filtered, 
+                # Non important cancer considered
+                GroupCategoryCount_Total - GroupCategoryCount_Filtered,
+                # important other cancers
+                sum_GroupCategoryCount_Filtered - GroupCategoryCount_Filtered,
+                # Non important other cancers
+                sum_GroupCategoryCount_Total - (GroupCategoryCount_Filtered +
+                  (GroupCategoryCount_Total - GroupCategoryCount_Filtered) + 
+                  (sum_GroupCategoryCount_Filtered - GroupCategoryCount_Filtered))
+            ), nrow = 2), alternative = "greater"
+        )$p.value
+    ) 
+
+
+# Adjust p-values for multiple testing using FDR correction
+cancer_comparison <- cancer_comparison %>%
+    mutate(FDR = p.adjust(P_Value, method = "fdr"))
+cancer_comparison %>% arrange(FDR)
+```
+
+    
+
+Cancer type prediction
+
+```{r}
+# put here the cancers to include
+dog_ct <- c("Head and Neck Cancer", "Bladder Cancer", "Sarcoma", "Breast Cancer", "Adrenal Tumor", "Prostate Cancer", "Lymphoma", "Leukemia", "Brain Cancer")
+horse_ct <- c()
+cat_ct <- c("Lymphoma", "Sarcoma")
+```
+
+```{r}
+# Filter expression and metadata
+dog_metadata <- all_metadata %>% filter(Species == "Canis lupus familiaris" & CT %in% dog_ct)
+cat_metadata <- all_metadata %>% filter(Species == "Felis catus"  & CT %in% cat_ct)
+horse_metadata <- all_metadata %>% filter(Species == "Equus caballus"  & CT %in% horse_ct)
+human_metadata <- all_metadata %>% filter(Species == "Homo sapiens" & CT %in% c(dog_metadata$CT, cat_metadata$CT, horse_metadata$CT) )
+
+dog_expression <- all_exp[, colnames(all_exp) %in% c("Genes", dog_metadata$Sample)]
+dog_expression <- dog_expression %>% column_to_rownames("Genes")
+cat_expression <- all_exp[, colnames(all_exp) %in% c("Genes", cat_metadata$Sample)]
+cat_expression <- cat_expression %>% column_to_rownames("Genes")
+horse_expression <- all_exp[, colnames(all_exp) %in% c("Genes", horse_metadata$Sample)]
+horse_expression <- horse_expression %>% column_to_rownames("Genes")
+human_expression <- all_exp[, colnames(all_exp) %in% c("Genes", human_metadata$Sample)]
+human_expression <- human_expression %>% column_to_rownames("Genes")
+```
+
+```{r}
+# Combine data
+combined_expression <- cbind(dog_expression, cat_expression, human_expression, horse_expression)
+combined_expression <- combined_expression %>% rownames_to_column("Genes")
+# Update metadata accordingly
+combined_metadata <- rbind(dog_metadata, cat_metadata, human_metadata, horse_metadata)
+combined_expression
+combined_metadata
+```
+```{r}
+# Check if this is in the same order
+all.equal(colnames(combined_expression[-1]), combined_metadata$Sample)
+```
+
+```{r}
+table( combined_metadata$Species, combined_metadata$CT)
+```
+
+```{r}
+
+# function to downsample
+downsample_mammals <- function(df, mammals_species, sample_size, s = seed) {
+  # Set the seed for reproducibility
+  set.seed(s)
+  
+  # Initialize an empty list to store downsampled data
+  downsampled_list <- list()
+  
+  # Loop over each species in mammals_species vector
+  for (species in mammals_species) {
+    # Downsample each species
+    downsampled_species <- df %>%
+      filter(Species == species) %>%
+      slice_sample(n = sample_size)
+    
+    # Add downsampled data to the list
+    downsampled_list[[species]] <- downsampled_species
+  }
+  
+  # Combine all downsampled species and the rest of the data
+  df_downsampled <- df %>%
+     # Filter out the species we already downsampled
+    filter(!Species %in% mammals_species) %>% 
+    # Bind the downsampled species
+    bind_rows(do.call(bind_rows, downsampled_list))  
+  
+  return(df_downsampled)
+}
+
+
+# sample based on cancer type since some species samples are more
+AT_metadata <- combined_metadata %>% filter(CT == "Adrenal Tumor")
+AT_expression <- combined_expression[, c("Genes", AT_metadata$Sample)]
+AT_expression <- AT_expression %>% column_to_rownames("Genes")
+
+Bl_metadata <- combined_metadata %>% filter(CT == "Bladder Cancer")
+Bl_metadata <- downsample_mammals(Bl_metadata, c("Homo sapiens"), sample_size = 25)
+Bl_expression <- combined_expression[,  c("Genes", Bl_metadata$Sample)]
+Bl_expression <- Bl_expression %>% column_to_rownames("Genes")
+
+Bra_metadata <- combined_metadata %>% filter(CT == "Brain Cancer")
+Bra_metadata <- downsample_mammals(Bra_metadata, c("Homo sapiens"), sample_size = 100)
+Bra_expression <- combined_expression[, c("Genes", Bra_metadata$Sample)]
+Bra_expression <- Bra_expression %>% column_to_rownames("Genes")
+
+Br_metadata <- combined_metadata %>% filter(CT == "Breast Cancer")
+Br_metadata <- downsample_mammals(Br_metadata, c("Homo sapiens"), sample_size = 500)
+Br_expression <- combined_expression[, c("Genes", Br_metadata$Sample)]
+Br_expression <- Br_expression %>% column_to_rownames("Genes")
+
+HNC_metadata <- combined_metadata %>% filter(CT == "Head and Neck Cancer")
+HNC_metadata <- downsample_mammals(HNC_metadata, c("Homo sapiens"), sample_size = 30)
+HNC_expression <- combined_expression[, c("Genes", HNC_metadata$Sample)]
+HNC_expression <- HNC_expression %>% column_to_rownames("Genes")
+
+Leu_metadata <- combined_metadata %>% filter(CT == "Leukemia")
+Leu_metadata <- downsample_mammals(Leu_metadata, c("Homo sapiens"), sample_size = 20)
+Leu_expression <- combined_expression[, c("Genes", Leu_metadata$Sample)]
+Leu_expression <- Leu_expression %>% column_to_rownames("Genes")
+
+Lym_metadata <- combined_metadata %>% filter(CT == "Lymphoma")
+Lym_metadata <- downsample_mammals(Lym_metadata, c("Homo sapiens", "Canis lupus familiaris"), sample_size = 5)
+Lym_expression <- combined_expression[, c("Genes", Lym_metadata$Sample)]
+Lym_expression <- Lym_expression %>% column_to_rownames("Genes")
+
+# M_metadata <- combined_metadata %>% filter(CT == "Melanoma")
+# M_metadata <- downsample_mammals(M_metadata, c("Homo sapiens"), sample_size = 20)
+# M_expression <- combined_expression[,  c("Genes", M_metadata$Sample)]
+# M_expression <- M_expression %>% column_to_rownames("Genes")
+
+P_metadata <- combined_metadata %>% filter(CT == "Prostate Cancer")
+P_metadata <- downsample_mammals(P_metadata, c("Homo sapiens"), sample_size = 25)
+P_expression <- combined_expression[,  c("Genes", P_metadata$Sample)]
+P_expression <- P_expression %>% column_to_rownames("Genes")
+
+S_metadata <- combined_metadata %>% filter(CT == "Sarcoma")
+S_metadata <- downsample_mammals(S_metadata, c("Homo sapiens", "Canis lupus familiaris"), sample_size = 10)
+S_expression <- combined_expression[,  c("Genes", S_metadata$Sample)]
+S_expression <- S_expression %>% column_to_rownames("Genes")
+
+# combine metadata
+combined_metadata_sampled <- rbind( AT_metadata, Bl_metadata, Bra_metadata, Br_metadata, HNC_metadata, Leu_metadata, Lym_metadata, P_metadata, S_metadata)
+# Combine data
+combined_expression_sampled <- cbind( AT_expression, Bl_expression, Bra_expression, Br_expression, HNC_expression, Leu_expression, Lym_expression, P_expression, S_expression)
+combined_expression_sampled <- combined_expression_sampled %>% rownames_to_column("Genes")
+
+# combined_expression_sampled
+# combined_metadata_sampled
+```
+
+```{r}
+# Check if this is in the same order
+all.equal(colnames(combined_expression_sampled[-1]), combined_metadata_sampled$Sample)
+table( combined_metadata_sampled$Species, combined_metadata_sampled$CT)
+```
+ 
+```{r}
+# filter for the common genes
+combined_expression_sampled <- combined_expression_sampled %>% filter(Genes %in% common_genes_in_all)
+```
+ 
+```{r}
+# Transpose normalized_counts 
+combined_expression_sampled_rem <- combined_expression_sampled %>%
+  # Move Gene column to rownames
+  column_to_rownames("Genes")
+transposed_combined_expression_sampled <- as.data.frame(t(combined_expression_sampled_rem)) %>%
+  # Convert rownames to a Sample column
+  rownames_to_column("Sample") 
+# Merge transposed_counts with metadata
+combined_data_2 <- transposed_combined_expression_sampled %>%
+  inner_join(data.frame(Sample = combined_metadata_sampled$Sample, CT=combined_metadata_sampled$CT, Species=combined_metadata_sampled$Species), by = "Sample")
+# make the target variable a factor
+combined_data_2 <- combined_data_2 %>%
+  mutate(CT = as.factor(CT))
+# Create a combined column for stratification
+combined_data_2 <- combined_data_2 %>%
+  mutate(strat_group = paste(Species, CT, sep = "_"))
+
+```
+
+
+```{r}
+table(combined_data_2$Species, combined_data_2$CT)
+```
+
+
+```{r}
+set.seed(seed)
+# Split the data into training and testing and sample based on the given strata
+ct_split <- initial_split(combined_data_2, prop=0.6, strata=strat_group) 
+ct_split
+```
+
+```{r}
+train_data_2 <- training(ct_split)
+test_data_2 <- testing(ct_split)
+```
+
+```{r}
+table(train_data_2$strat_group)
+```
+
+
+```{r}
+model_name_2 <- "XGB"
+
+set.seed(seed)
+# Create a recipe for preprocessing
+ct_recipe <- recipe(CT ~., data = train_data_2) %>%
+  update_role(Sample, new_role = "ID") %>%
+  update_role(Species, new_role = "Mammal") %>%
+  update_role(strat_group, new_role = "Strata")
+  
+# Calculate class weights; ref: https://www.analyticsvidhya.com/blog/2020/10/improve-class-imbalance-class-weights/
+# to resolve the imbalance of different cancer type samples
+class_counts <- table(train_data_2$CT)
+total_samples <- sum(class_counts)
+num_classes <- length(class_counts)
+class_weights <- total_samples / (num_classes * class_counts)
+
+set.seed(seed)
+# Define the Random Forest model
+if(model_name_2=="RF"){
+  model_2 <- rand_forest(mtry = 5, trees = 500, min_n = 10) %>% 
+  set_engine("ranger", importance = "permutation", class.weights = class_weights) %>%
+  set_mode("classification")
+  
+}else if(model_name_2=="DT"){
+  # Decision Tree
+  model_2 <- decision_tree(min_n = 10) %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+  
+}else if(model_name_2=="LR"){
+  model_2 <- multinom_reg(penalty = 0.1) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification")
+  
+}else if(model_name_2=="XGB"){
+  # XGBoost
+  model_2 <- parsnip::boost_tree(trees = 500) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+}
+
+set.seed(seed)
+# Combine into a workflow
+ct_workflow <- workflow() %>%
+  add_recipe(ct_recipe) %>%
+  add_model(model_2)
+
+set.seed(seed)
+# Train the model on the training data
+final_fit_2 <- fit(ct_workflow, data = train_data_2)
+
+# Make predictions on the test set
+test_predictions_2 <- predict(final_fit_2, new_data = test_data_2, type = "prob") %>%
+  bind_cols(predict(final_fit_2, new_data = test_data_2)) %>%
+  bind_cols(test_data_2)
+
+# Confusion matrix
+conf_matrix_2 <- conf_mat(test_predictions_2, truth = CT, estimate = .pred_class)
+
+# Metrics 
+metrics_summary_2 <- metrics(test_predictions_2, truth = CT, estimate = .pred_class)
+roc_auc_value_2 <- roc_auc(test_predictions_2, truth = CT, `.pred_Adrenal Tumor`, `.pred_Bladder Cancer`, `.pred_Brain Cancer`, `.pred_Breast Cancer`,`.pred_Head and Neck Cancer`,`.pred_Leukemia`, `.pred_Lymphoma`, `.pred_Prostate Cancer`, `.pred_Sarcoma` )
+precision_2 <- precision(test_predictions_2, truth = CT, estimate = .pred_class)
+recall_2 <- recall(test_predictions_2, truth = CT, estimate = .pred_class)
+f1_score_2 <- f_meas(test_predictions_2, truth = CT, estimate = .pred_class)
+
+# Display results
+print(conf_matrix_2)
+print(metrics_summary_2)
+print(roc_auc_value_2)
+print(precision_2)
+print(recall_2)
+print(f1_score_2)
+
+# Plot the ROC Curve
+roc_curve_data_2 <- roc_curve(test_predictions_2, truth = CT, `.pred_Adrenal Tumor`, `.pred_Bladder Cancer`, `.pred_Brain Cancer`, `.pred_Breast Cancer`,`.pred_Head and Neck Cancer`,`.pred_Leukemia`, `.pred_Lymphoma`, `.pred_Prostate Cancer`, `.pred_Sarcoma`) 
+roc_plot_2 <- autoplot(roc_curve_data_2)
+ggsave(paste0("ROC_Curve_",model_name_2,".jpg"), plot = roc_plot_2, width = 8, height = 8, dpi = 300)
+
+```
+
+
+```{r}
+set.seed(seed)
+# Compute feature importance
+all_feat_imp_2 <- ct_workflow %>% 
+  fit(train_data_2) %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 15000)
+```
+
+```{r}
+# get important genes greater than 0
+all_feat_imp_genes <- all_feat_imp_2$data %>% filter(Importance>0)
+all_feat_imp_genes
+```
+```{r}
+all_cosmic %>%
+    filter(GENE_SYMBOL %in% all_feat_imp_genes$Variable) %>%
+    dplyr::select(c(GENE_SYMBOL, Name, `Tumour Types(Somatic)`, `Tumour Types(Germline)`, `Cancer Syndrome`))
+```
+
+
+```{r}
+library("DALEX")
+set.seed(seed)
+
+# subset to set of cosmic genes
+train_data_2_subset <- train_data_2 %>% select("Sample", "Species", "strat_group", "CT", any_of( all_cosmic$GENE_SYMBOL))
+test_data_2_subset <- test_data_2 %>% select("Sample", "Species", "strat_group", "CT", any_of(all_cosmic$GENE_SYMBOL))
+
+# subset to set of cosmic genes
+train_data_2_fi <- train_data_2 %>% select("Sample", "Species", "strat_group", "CT",  all_feat_imp_genes$Variable)
+test_data_2_fi <- test_data_2 %>% select("Sample", "Species", "strat_group", "CT", all_feat_imp_genes$Variable)
+
+# Create a recipe for preprocessing
+ct_recipe_explain <- recipe(CT ~., data = train_data_2_subset) %>%
+  update_role(Sample, new_role = "ID") %>%
+  update_role(Species, new_role = "Mammal") %>%
+  update_role(strat_group, new_role = "Strata")
+
+set.seed(seed)
+# Combine into a workflow
+ct_workflow_explain <- workflow() %>%
+  add_recipe(ct_recipe_explain) %>%
+  add_model(model_2)
+
+set.seed(seed)
+# Train the model on the training data
+final_fit_2_explain <- fit(ct_workflow_explain, data = train_data_2_subset)
+
+# Create a recipe for preprocessing
+ct_recipe_explain_fi <- recipe(CT ~., data = train_data_2_fi) %>%
+  update_role(Sample, new_role = "ID") %>%
+  update_role(Species, new_role = "Mammal") %>%
+  update_role(strat_group, new_role = "Strata")
+
+set.seed(seed)
+# Combine into a workflow
+ct_workflow_explain_fi <- workflow() %>%
+  add_recipe(ct_recipe_explain_fi) %>%
+  add_model(model_2)
+
+set.seed(seed)
+# Train the model on the training data
+final_fit_2_explain_fi <- fit(ct_workflow_explain_fi, data = train_data_2_fi)
+
+model_label <- "XGBoost"
+
+# create a representation of a black box model to be further explained
+explainer_model <- DALEX::explain(
+  # get the underlying model object
+  model = final_fit_2_explain$fit$fit,
+  # Exclude the target variable
+  data = train_data_2_subset %>% select(-CT, -Sample, -Species, -strat_group) ,  
+  y = train_data_2_subset$CT,
+  label = model_label,
+  type = "classification"
+)
+
+# create a representation of a black box model to be further explained
+explainer_model_fi <- DALEX::explain(
+  # get the underlying model object
+  model = final_fit_2_explain_fi$fit$fit,
+  # Exclude the target variable
+  data = train_data_2_fi %>% select(-CT, -Sample, -Species, -strat_group) ,  
+  y = train_data_2_fi$CT,
+  label = model_label,
+  type = "classification"
+)
+
+explainer_model_all <- DALEX::explain(
+  # get the underlying model object
+  model = final_fit_2$fit$fit,
+  # Exclude the target variable
+  data = train_data_2 %>% select(-CT, -Sample, -Species, -strat_group) ,  
+  y = train_data_2$CT,
+  label = model_label,
+  type = "classification"
+)
+```
+
+
+
+```{r}
+# calculate feature importance
+importance_model <- feature_importance(explainer_model_all, loss_function = DALEX::loss_cross_entropy, variables=all_feat_imp_genes$Variable[1:10])
+global_fi <- plot(importance_model)
+ggsave(paste0("global_FI.jpg"), plot = global_fi, width = 8, height = 8, dpi = 300)
+
+```
+
+```{r}
+# intepreting how variations in gene expression influence model predictions
+genes_of_interest <-all_feat_imp_genes$Variable[1:6]
+mp_p <- model_profile(explainer_model_all, type = "accumulated",  variables = genes_of_interest)
+mp_p$color <- "_label_"
+variable_effects <- plot(mp_p , variables = genes_of_interest)
+ggsave(paste0("variable_effects.jpg"), plot = variable_effects, width = 18, height = 18, dpi = 300)
+
+```
+
+```{r}
+# Check to see how a single observation prediction makes sense
+shap_single <- predict_parts(explainer_model_all, test_data_2[1,], type = "shap", B=5, N=5)
+break_down <- plot(shap_single, max_features=3)
+ggsave(paste0("break_down.jpg"), plot = break_down, width = 8, height = 8, dpi = 300)
+
+```
+
+```{r}
+#ref: https://stackoverflow.com/questions/72105356/see-vip-for-each-class-in-multi-class-randomforest
+# get feature importance for each cancer
+#this takes LONG
+for(cancer in unique(train_data_2$CT)){
+  
+  # interpret the impact of genes on model prediction on training dataset using SHAP values
+  # subset train data to select the cancer to analyze
+  train_data_2_ct <- train_data_2 %>% filter(CT==cancer)
+  # pick the first sample from the dataset
+  train_data_2_sample <- train_data_2_ct[1, ]
+  shap_df <- predict_parts(
+      explainer = explainer_model_all,
+      new_observation = train_data_2_sample,
+      type = "shap",
+      B=5,
+      N=5
+    )
+  print(data.frame(shap_df))
+  # get average contribution in cancer types for each gene
+  feat_imp_2 <- data.frame(shap_df) %>%
+    # remove the unwanted features
+    filter(!variable_name %in% c("Sample", "Species", "strat_group") ) %>%
+    # group by cancer type and gene
+    group_by(label, variable_name) %>%
+    # calculate average contribution
+    summarize(avg_contribution = mean(contribution)) %>%
+    pivot_wider(names_from = label, values_from = avg_contribution)
+
+  # get cancer type column
+  ct_col <- paste0(model_label,".", cancer)
+  print(ct_col)
+  # access the col
+  cancer_Specific <- feat_imp_2[, c("variable_name", ct_col)] 
+
+  # get important genes
+  # convert string into symbol and evaluate so that it can be used as a reference
+  feat_imp_genes_2 <- cancer_Specific %>% filter(!!sym(ct_col)> 0)  %>% arrange(desc(!!sym(ct_col)))
+  print(feat_imp_genes_2)
+  
+  #Check is cosmic genes are in the feature importance results
+  cosmic_res_2 <- all_cosmic %>%
+    filter(GENE_SYMBOL %in% feat_imp_genes_2$variable_name) %>%
+    dplyr::select(c(GENE_SYMBOL, Name, `Tumour Types(Somatic)`, `Tumour Types(Germline)`, `Cancer Syndrome`)) %>%
+    # Match order 
+    arrange(match(GENE_SYMBOL, feat_imp_genes_2$variable_name))
+
+  print(cosmic_res_2)
+  
+  ct_cosmic <- all_cosmic_terms_separated_groups %>% 
+    filter(GroupedCategory == cancer) 
+
+  cancer_specific_df <- cosmic_res_2 %>% filter(GENE_SYMBOL %in% unique(ct_cosmic$GENE_SYMBOL))
+  print(cancer_specific_df)
+
+}
+```
+
+

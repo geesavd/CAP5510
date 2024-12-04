@@ -1,0 +1,83 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load libraries
+require(tibble) # dataframe manipulation
+require(readr)  # for read_csv()
+require(dplyr)  # for mutate()
+require(tidyr)  # for unnest()
+require(purrr)  # for map(), reduce()
+```
+
+
+```{r}
+# Get the list of files in the directory
+disease_full_path <- "/blue/kgraim/leslie.smith1/pan/data/homo_sapiens/panCancer_Atlas"
+all_diseases_init <- list.files(disease_full_path)
+
+# Filter the files to only keep the ones containing '2018' in the name
+all_diseases <- all_diseases_init[grep("2018",all_diseases_init)]
+
+# Create path to the given txt file within each folder in all_diseases
+human_expr <- file.path(disease_full_path, all_diseases, "data_mrna_seq_v2_rsem.txt")
+
+# Check if all the files exist
+all(file.exists(human_expr))
+
+# Put the files into a list of dfs
+human_expre <- lapply(human_expr,readr::read_tsv)
+```
+
+
+```{r}
+# #first get list of genes that is common to all datasets
+inital_list <- human_expre[1][[1]]$Hugo_Symbol # get the Hugo_symbol column from the 1st dataframe
+inital_list <- inital_list[!(is.na(inital_list))] # remove NAs
+
+# Iterate through all other dfs to find common genes
+for(i in 2:length(human_expre)){
+  curr <- human_expre[i][[1]]
+  inital_list <- intersect(inital_list, curr$Hugo_Symbol) #extracts the Hugo_Symbol column from the current data frame and keep the common hugo symbols
+}
+# 
+# #start dat 
+all_dat <- human_expre[1][[1]] # get the 1st dataframe from human_expre
+all_dat <- all_dat %>% dplyr::select(-Entrez_Gene_Id) # remove the given column
+all_dat <- all_dat[!(is.na(all_dat$Hugo_Symbol)),]  # filter out NAs
+all_dat <- all_dat %>% group_by(Hugo_Symbol) %>% summarise_all(median) # # group data by gene and calculate mean for all the other columns 
+all_dat <- all_dat[match(inital_list, all_dat$Hugo_Symbol),] # reorder all_dat to match the order of hugo_symbol in initial_list
+
+```
+
+
+```{r}
+for(i in 2:length(human_expre)){
+  dat <- human_expre[i][[1]] # get the current df
+  dat <- dat[,-2] # remove the 2nd column
+  dat <- dat[!(is.na(dat$Hugo_Symbol)),] # filter out NAs
+  dat1 <- dat %>% group_by(Hugo_Symbol) %>% summarise_all(median)  # group data by gene and calculate mean for all the other columns
+  dat1 <- dat1[match(inital_list, dat1$Hugo_Symbol),] # reorder dat1 to match the order of hugo_symbol in initial_list
+  message(paste0("BOUND ",i)) # print the iteration of the loop
+  print(dim(all_dat)) # print dimensions of all_dat
+  print(all.equal(target = all_dat$Hugo_Symbol, current = dat1$Hugo_Symbol)) # check if genes in all_dat match those in dat1
+  # If all the genes match, combine data 
+   if((all.equal(target = all_dat$Hugo_Symbol, current = dat1$Hugo_Symbol))){
+    dat1 <- dat1 %>% dplyr::select(-Hugo_Symbol) # remove the given column
+    all_dat <- cbind(all_dat, dat1) # combine all_dat with the current dat1 by adding dat1 as new columns
+  }
+}
+
+write.table(all_dat,file.path("human_expr.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE)
+```
+
+```{r}
+dim(all_dat)
+gene_names_human <- all_dat$Hugo_Symbol
+total_unique_genes_human <- length(unique(gene_names_human))
+print(total_unique_genes_human)
+
+```
+

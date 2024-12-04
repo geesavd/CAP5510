@@ -1,0 +1,213 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+require(tibble) # dataframe manipulation
+require(readr)  # for read_csv()
+require(dplyr)  # for mutate()
+require(tidyr)  # for unnest()
+require(purrr)  # for map(), reduce()
+library(here)
+```
+
+```{r}
+#### CANINE PREPROCESSING #### 
+#get the project ids and master metadata file 
+proj_full_path <- "/blue/kgraim/leslie.smith1/pan/data/Canis_familiaris/BioProjIDs.txt"
+projects <- read_table(proj_full_path)
+excluded <- c("PRJNA914497","PRJNA338759") 
+projects <- projects[!(projects$BioProjIDs %in% excluded),]
+meta_full_path <- "/blue/kgraim/geesa.daluwatumu/canis_lupus_familiaris/metadata_final_new.txt"
+canine_metadata <- readr::read_tsv(meta_full_path)
+```
+
+```{r}
+# create expression matrix
+count_files <- file.path("/blue", "kgraim","leslie.smith1", "pan", "data", "Canis_familiaris", projects$BioProjIDs, "freya_results", "dexseq_count", paste0(projects$BioProjIDs, ".count"))
+all(file.exists(count_files))
+canine_expr <- lapply(count_files, readr::read_tsv)
+canine_expression <- canine_expr %>% purrr::reduce(inner_join)
+dim(canine_expression)
+```
+
+```{r}
+# correct hugo names  
+library(biomaRt)
+old_ensembl <- useEnsembl(biomart = "ENSEMBL_MART_ENSEMBL", host = "https://may2021.archive.ensembl.org",
+                          dataset = "clfamiliaris_gene_ensembl",version = 104)
+gene_names <-  getBM(attributes = c('ensembl_gene_id', 'external_gene_name'), filters = list(ensembl_gene_id = canine_expression$Genes),
+                     mart = old_ensembl)
+canine_final <- merge(gene_names, canine_expression, by.x = "ensembl_gene_id", by.y = "Genes")
+canine_final <- canine_final[,-1] #drop entrez ids 
+canine_final[1:5,1:5]
+write.table(canine_final, here("canine_expr_hugo_names.tsv"),sep = "\t", col.names = TRUE, row.names = FALSE)
+
+```
+```{r}
+# summarise values by gene (for duplicate genes) # 
+canine_final <- canine_final %>% group_by(external_gene_name) %>% summarise_all(median)
+canine_final <- canine_final[!is.na(canine_final$external_gene_name),]
+```
+
+Ortholog genes
+```{r}
+library(vroom)
+# get the path of the files
+files <- list.files(file.path("/blue", "kgraim","geesa.daluwatumu", "canis_lupus_familiaris","canine_genes_HCOP"), recursive = FALSE)
+# This has the file name we need
+file_names <- unlist(sapply(files, function(x) strsplit(x, '/')[[1]], USE.NAMES = FALSE ))
+# get all gene files
+hcop <- "canine_genes_HCOP"
+all_gene_files <- vroom(here(hcop, file_names))
+all_gene_files
+
+```
+
+```{r}
+# get unique genes
+unique_in_gene_files <- unique(all_gene_files[,c('Primary symbol','Ortholog symbol')])
+print(length(unique(unique_in_gene_files$`Primary symbol`)))
+print(length(unique(unique_in_gene_files$`Ortholog symbol`)))
+unique_in_gene_files
+
+```
+
+
+```{r}
+# combine canine hugo genes with ortholog genes
+canine_exp_gene_details <- inner_join(canine_final, unique_in_gene_files, by = join_by(external_gene_name == `Primary symbol`))
+names(canine_exp_gene_details)[names(canine_exp_gene_details) == "Ortholog symbol"] <- "human_mapped"
+canine_exp_gene_details <- canine_exp_gene_details[!is.na(canine_exp_gene_details$human_mapped),]
+
+```
+
+```{r}
+# Remove the unnecessary columns
+canine_exp_gene_details <- canine_exp_gene_details[,!names(canine_exp_gene_details) %in% c("Gene", "description","external_gene_name")]
+# Move last column to the start
+canine_exp_gene_details <- canine_exp_gene_details %>% dplyr::select(human_mapped, everything())
+# Rename column
+names(canine_exp_gene_details)[1] <- "Gene"
+canine_exp_gene_details
+```
+
+```{r}
+# Get the median for the canine dataset as it has duplicate genes
+canine_exp_gene_details <- canine_exp_gene_details %>% group_by(Gene) %>% summarise_all(median)
+```
+
+
+```{r}
+write.table(canine_exp_gene_details,here("canine_expr_ortho.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE)
+
+```
+
+
+Combine human, dog, horse and cat expression data
+```{r}
+count_files_all <- fs::dir_ls("/blue/kgraim/briasmith/r_projects", recurse = TRUE, regex = "count$") # find ALL count files in the current directory. Recursively searches
+```
+
+```{r}
+species_expr <- lapply(count_files_all, function(file) {
+  data <- readr::read_tsv(file)  # load file
+  head(data, -5)                 # drop the last 5 rows
+})
+```
+```{r}
+# Remove horse from the list to get the # of genes for cat bioprojects that remain in the list
+species_expr_cat <- species_expr[-1]
+
+# join the files 
+species_expr_cat <- purrr::reduce(species_expr_cat, inner_join, by = "Genes")
+
+# Drop rows with NA in the "Genes" column only
+species_expr_cat <- species_expr_cat %>% filter(!is.na(Genes))
+
+species_expr_cat$Genes <- sub("^[^_]*_[^_]*_(.*)", "\\1", species_expr_cat$Genes)
+
+species_expr_cat$Genes <- gsub("[+-]", "", species_expr_cat$Genes)
+species_expr_cat <- species_expr_cat %>% dplyr::select(-ERR1331679, -ERR1331678)
+species_expr_cat <- species_expr_cat %>% group_by(Genes) %>% summarise_all(median)
+
+
+species_expr_horse <- species_expr[1]
+# join the files 
+species_expr_horse <- purrr::reduce(species_expr_horse, inner_join, by = "Genes")
+
+# Drop rows with NA in the "Genes" column only
+species_expr_horse <- species_expr_horse %>% filter(!is.na(Genes))
+
+species_expr_horse$Genes <- sub("^[^_]*_[^_]*_(.*)", "\\1", species_expr_horse$Genes)
+
+species_expr_horse$Genes <- gsub("[+-]", "", species_expr_horse$Genes)
+species_expr_horse <- species_expr_horse %>% group_by(Genes) %>% summarise_all(median)
+
+
+# Get the number of genes in cat and horse
+# Extract the column containing gene names
+gene_names_cat <- species_expr_cat$Genes
+gene_names_horse <- species_expr_horse$Genes
+
+# Find the total number of unique genes
+total_unique_genes_cat <- length(unique(gene_names_cat))
+total_unique_genes_horse <- length(unique(gene_names_horse))
+
+
+# Print the result
+print(total_unique_genes_cat)
+print(total_unique_genes_horse)
+
+```
+
+```{r}
+cat_horse_exp <- inner_join(species_expr_horse, species_expr_cat, by="Genes")
+cat_horse_exp
+```
+
+
+```{r}
+# Read in the canine expression data and rename 'external_gene_name' column to 'Genes'
+canine_expr <- read_tsv(here("canine_expr_ortho.tsv"))
+
+# Rename the column from "external_gene_name" to "Genes"
+canine_expr <- canine_expr %>% rename(Genes = Gene)
+
+# Drop rows with NA in the "Genes" column only
+canine_expression <- canine_expr %>% filter(!is.na(Genes))
+```
+
+```{r}
+# Get total unique genes for dog
+gene_names_dog <- canine_expression$Genes
+total_unique_genes_dog <- length(unique(gene_names_dog))
+print(total_unique_genes_dog)
+dim(canine_expression)
+```
+
+
+```{r}
+# Read in the human expression data 
+human_expr <- read_tsv(here("human_expr.tsv"))
+
+# Rename the column from "external_gene_name" to "Genes"
+human_expr <- human_expr %>% rename(Genes = Hugo_Symbol)
+
+# Drop rows with NA in the "Genes" column only
+human_expression <- human_expr %>% filter(!is.na(Genes))
+```
+
+
+```{r}
+# Combine canine_expression with species_expression
+all_species_expression <- canine_expression %>% inner_join(cat_horse_exp, by = "Genes")
+
+# Combine human expression with all species expression
+all_species_expression_2 <- human_expression %>% inner_join(all_species_expression, by = "Genes")
+```
+
+```{r}
+write.table(all_species_expression_2,here("human_canine_horse_cat_new.tsv"), sep = "\t", col.names = TRUE, row.names = FALSE)
+```
+
