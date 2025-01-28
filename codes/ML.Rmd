@@ -1,7 +1,6 @@
 ---
-title: "Bioinformatics Project ML"
-output: html_document
-date: "2024-11-22"
+title: "ML Notebook"
+output: html_notebook
 ---
 
 ```{r}

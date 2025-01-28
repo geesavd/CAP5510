@@ -1,5 +1,5 @@
 ---
-title: "R Notebook"
+title: "species merge Notebook"
 output: html_notebook
 ---
 ```{r}
@@ -44,6 +44,7 @@ canine_final[1:5,1:5]
 write.table(canine_final, here("canine_expr_hugo_names.tsv"),sep = "\t", col.names = TRUE, row.names = FALSE)
 
 ```
+
 ```{r}
 # summarise values by gene (for duplicate genes) # 
 canine_final <- canine_final %>% group_by(external_gene_name) %>% summarise_all(median)
@@ -106,6 +107,7 @@ write.table(canine_exp_gene_details,here("canine_expr_ortho.tsv"), sep = "\t", c
 
 Combine human, dog, horse and cat expression data
 ```{r}
+# get cat and horse
 count_files_all <- fs::dir_ls("/blue/kgraim/briasmith/r_projects", recurse = TRUE, regex = "count$") # find ALL count files in the current directory. Recursively searches
 ```
 
@@ -125,23 +127,25 @@ species_expr_cat <- purrr::reduce(species_expr_cat, inner_join, by = "Genes")
 # Drop rows with NA in the "Genes" column only
 species_expr_cat <- species_expr_cat %>% filter(!is.na(Genes))
 
+# extracting the gene
 species_expr_cat$Genes <- sub("^[^_]*_[^_]*_(.*)", "\\1", species_expr_cat$Genes)
-
 species_expr_cat$Genes <- gsub("[+-]", "", species_expr_cat$Genes)
+# weren't cancer samples
 species_expr_cat <- species_expr_cat %>% dplyr::select(-ERR1331679, -ERR1331678)
+# remove duplicates for cat
 species_expr_cat <- species_expr_cat %>% group_by(Genes) %>% summarise_all(median)
 
-
+# extract only horse
 species_expr_horse <- species_expr[1]
 # join the files 
 species_expr_horse <- purrr::reduce(species_expr_horse, inner_join, by = "Genes")
 
 # Drop rows with NA in the "Genes" column only
 species_expr_horse <- species_expr_horse %>% filter(!is.na(Genes))
-
+# extracting the gene
 species_expr_horse$Genes <- sub("^[^_]*_[^_]*_(.*)", "\\1", species_expr_horse$Genes)
-
 species_expr_horse$Genes <- gsub("[+-]", "", species_expr_horse$Genes)
+# remove duplicates for horse
 species_expr_horse <- species_expr_horse %>% group_by(Genes) %>% summarise_all(median)
 
 
@@ -162,6 +166,7 @@ print(total_unique_genes_horse)
 ```
 
 ```{r}
+# join horse and cat counts
 cat_horse_exp <- inner_join(species_expr_horse, species_expr_cat, by="Genes")
 cat_horse_exp
 ```
@@ -200,10 +205,10 @@ human_expression <- human_expr %>% filter(!is.na(Genes))
 
 
 ```{r}
-# Combine canine_expression with species_expression
+# Combine canine_expression with cat-horse
 all_species_expression <- canine_expression %>% inner_join(cat_horse_exp, by = "Genes")
 
-# Combine human expression with all species expression
+# Combine human expression with canine-cat-horse expression
 all_species_expression_2 <- human_expression %>% inner_join(all_species_expression, by = "Genes")
 ```
 
